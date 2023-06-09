@@ -1,0 +1,180 @@
+#!/bin/bash
+
+
+set -a # automatically export all variables and source python env
+source $PWD/.env
+source .colours
+source $PWD/../env/bin/activate
+set +a
+
+check_vars() {
+    if [[ -z $CLOUD_USER || 
+        -z $RELEASE_TAG ||
+        -z $CLOUD_PURPOSE ||
+        -z $DEVICE_IDENTIFIER ||
+        -z $CLOUD_REGION ||
+        -z $AMI_MANIFEST ||
+        -z $AWSV_PROFILE ]]; then
+        echo -e " 💥 Following environment variables are required: 💥"
+        echo -e "${BYellow}CLOUD_USER=${BICyan}${CLOUD_USER}
+${BYellow}RELEASE_TAG=${BICyan}${RELEASE_TAG}
+${BYellow}CLOUD_PURPOSE=${BICyan}${CLOUD_PURPOSE}
+${BYellow}DEVICE_IDENTIFIER=${BICyan}${DEVICE_IDENTIFIER}
+${BYellow}CLOUD_REGION=${BICyan}${CLOUD_REGION}
+${BYellow}AMI_MANIFEST=${BICyan}${AMI_MANIFEST}
+${BYellow}AWSV_PROFILE=${BICyan}${AWSV_PROFILE}"
+        echo -e "${Color_Off}exiting..."
+        exit 1
+    fi
+}
+
+check_vars
+
+# run deployment script and capture output
+run_deployment_script() {
+    OUTPUT=$(. $1 | tee /dev/tty)
+
+    # hacky check for failure in output string
+    if [[ $OUTPUT != *"failed=0"* || $OUTPUT != *"unreachable=0"* ]];
+    then
+        echo "💥 deployment failed 💥"
+        exit 1
+    fi
+}
+
+success_msg() {
+    echo -e ${BGreen} "✅ $1 deployed!${Color_Off}"
+}
+
+extracted_variable_msg() {
+    echo -e "${BGreen}Got the following $1:"
+    echo -e ${BICyan}${!2}${Color_Off} 
+}
+
+continue_prompt() {
+    read -p "Press enter to $1: "
+}
+
+store_env_var() {
+    echo -e "$(date)\n$1=${!1}\n" >> "deploy_env_log.txt"
+    # check if env var exists 
+    if ! grep -q "$1=" .env; then
+        echo "export $1=" >> .env
+    fi
+    sed -i -r "s/$1=.*/$1=${!1}/g" .env
+}
+
+remove_env_var() {
+    echo -e "removing old env var $1"
+    sed -i -r "s/$1=.*/$1=/g" .env
+}
+
+# step1
+deploy_preop() {
+    echo -e "${BGreen}Ready to deploy cloud: ${BICyan}${RELEASE_TAG}"
+    echo -e "${BGreen}ami: ${BICyan}${AMI_MANIFEST}${Color_Off}"
+    continue_prompt "deploy preop"
+
+    run_deployment_script 1-preop.sh
+    
+    # get preop manifest from output - method not robust!
+    BUFFER="${OUTPUT#*Store preop cloud information in \"*}"
+    export PREOP_MANIFEST="${BUFFER%%\"] *}"
+    store_env_var "PREOP_MANIFEST"
+    success_msg "Preop"
+    extracted_variable_msg "preop manifest" "PREOP_MANIFEST"
+}
+
+# step2
+deploy_vault() {
+
+    continue_prompt "deploy vault"
+    run_deployment_script 2-vault.sh
+
+    # get vault url from output
+    BUFFER="${OUTPUT#*Set up DNS for Vault with \"*}"
+    export VAULT_API_HOST="${BUFFER%%\"] *}"
+    store_env_var "VAULT_API_HOST"
+
+    success_msg "Vault"
+    extracted_variable_msg "vault api host url" "VAULT_API_HOST"
+}
+
+# step3
+deploy_compute() {
+    continue_prompt "deploy compute"
+    run_deployment_script 3-compute.sh
+    success_msg "Compute"
+}
+
+# step4
+deploy_guicloud() {
+    continue_prompt "deploy gui-cloud"
+    run_deployment_script 4-guicloud.sh
+
+    # get session manager url from output
+    BUFFER="${OUTPUT#*Session manager URL: https://*}"
+    export GUICLOUD_API_HOST="${BUFFER%%\"*}"
+    store_env_var "GUICLOUD_API_HOST"
+    
+    success_msg "Gui-cloud"
+    extracted_variable_msg "session manager url" "GUICLOUD_API_HOST"
+}
+
+# step5
+deploy_connect() {
+    continue_prompt "connect the vault and gui-cloud"
+    run_deployment_script 5-connect-gv.sh
+    success_msg "Full cloud"
+}
+
+# Run deployment
+if [ $# -eq 0 ]; then
+    echo "No args provided. Will run full deployment"
+    read -p "Press Enter to continue: "
+    deploy_preop && \
+    deploy_vault &&
+    deploy_compute && \
+    deploy_guicloud && \
+    deploy_connect
+elif [[ $1 == "preop" || $1 -eq "1" ]]; then
+    if [[ $2 -eq "-a" ]]; then
+        echo "Will deploy full cloud from preop stage"
+        deploy_preop && \
+        deploy_vault && \
+        deploy_compute && \
+        deploy_guicloud && \
+        deploy_connect
+    else
+        deploy_preop
+    fi
+elif [[ $1 == "vault" || $1 -eq "2" ]]; then
+    if [[ $2 -eq "-a" ]]; then
+        echo "Will deploy full cloud from vault stage"
+        deploy_vault && \
+        deploy_compute && \
+        deploy_guicloud && \
+        deploy_connect
+    else
+        deploy_vault
+    fi
+elif [[ $1 == "compute" || $1 -eq "3" ]]; then
+    if [[ $2 -eq "-a" ]]; then
+        echo "Will deploy full cloud from compute stage"
+        deploy_compute && \
+        deploy_guicloud && \
+        deploy_connect
+    else
+        deploy_compute
+    fi
+elif [[ $1 == "guicloud" || $1 -eq "4" ]]; then
+    if [[ $2 -eq "-a" ]]; then
+        echo "Will deploy full cloud from guicloud stage"
+        deploy_guicloud && \
+        deploy_connect
+    else
+        deploy_guicloud
+    fi
+elif [[ $1 == "connect" || $1 -eq 5 ]]; then
+        deploy_connect
+fi
